@@ -1,0 +1,164 @@
+# snmp2opcua configuration
+# Anything you leave out falls back to the defaults in snmp2opcua/config.py
+
+snmp:
+  listen_host: 0.0.0.0
+  listen_port: 162              # needs root/admin (or CAP_NET_BIND_SERVICE); use e.g. 1162 for testing
+  # Several network interfaces/ports, like the SNMP agent's "Network Interfaces" list.
+  # Leave empty to use listen_host:listen_port only.
+  network_interfaces: []        # e.g. [{address: 0.0.0.0, port: 162}, {address: 10.0.0.5, port: 1162}]
+  communities: [public]         # accepted v1/v2c communities; [] = accept any
+  accept_all_hosts: true        # "Accept packets from all hosts"; false = only allowed_sources
+  allowed_sources: []           # IP/Host access list, e.g. [10.10.0.0/16, 192.168.1.20]
+  respond_to_informs: true      # acknowledge INFORMs (and answer SNMPv3 engine discovery)
+  versions: [v1, v2c, v3]       # e.g. [v3] to accept only authenticated/encrypted traps
+
+  v3:
+    engine_id: null             # gateway engine ID (hex). null = generate once and keep in state_file
+    state_file: snmp2opcua_engine.json   # stores engine ID + boots counter (must be writable)
+    replay_protection: true     # RFC 3414 timeliness check for traps; disable only for devices
+                                # that reset engineBoots on reboot
+    users:
+      # auth_protocol: MD5, SHA, SHA224, SHA256, SHA384, SHA512, NONE
+      # priv_protocol: DES, AES (=AES128), AES192, AES256, AES192C, AES256C, NONE
+      #   AES192/AES256 = Blumenthal key extension (net-snmp default)
+      #   AES192C/AES256C = Reeder key extension (Cisco and many network devices)
+      # Keys: at least 8 characters. Use ${ENV_VAR} to keep them out of this file.
+      - name: opcgw
+        auth_protocol: SHA256
+        auth_key: ${SNMP_AUTH_KEY}
+        priv_protocol: AES
+        priv_key: ${SNMP_PRIV_KEY}
+        # engine_ids: [800000090300aabbccddeeff]   # optional: only accept traps from these devices
+      # - name: legacy-ups
+      #   auth_protocol: MD5
+      #   auth_key: "ups-auth-pass"
+      #   priv_protocol: DES
+      #   priv_key: "ups-priv-pass"
+
+opcua:
+  mode: server                  # server = host our own OPC UA server; client = write into an existing one
+
+  server:
+    endpoint: opc.tcp://0.0.0.0:4840/snmp2opcua/
+    server_name: SNMP Trap Gateway
+    namespace: urn:snmp2opcua:gateway
+    # NoSecurity is fine for a lab. For production use e.g. [Basic256Sha256_SignAndEncrypt]
+    # and supply a certificate + key (see README).
+    security_policies: [NoSecurity]
+    certificate: null           # e.g. certs/server_cert.der
+    private_key: null           # e.g. certs/server_key.pem
+    events: true                # fire an OPC UA event (SnmpTrapEventType) per trap
+    recent_traps: 50            # size of Gateway/RecentTrapsJson
+    max_devices: 1000           # cap on per-source device nodes
+
+  client:
+    url: opc.tcp://192.168.1.50:4840
+    username: null
+    password: null              # or set the OPCUA_PASSWORD environment variable
+    # "Policy,Mode,client_cert,client_key", e.g. "Basic256Sha256,SignAndEncrypt,certs/cert.der,certs/key.pem"
+    security_string: null
+    timeout: 4
+    reconnect_delay: 5
+    # Map trap fields to NodeIds that already exist on the target server. Use any subset.
+    # Fields: trap_json, varbinds_json, source_ip, version, trap_oid, trap_name,
+    #         uptime, received_at, severity, trap_count, summary
+    nodes:
+      trap_json: "ns=2;s=SNMP.LastTrapJson"
+      source_ip: "ns=2;s=SNMP.LastSourceIP"
+      trap_name: "ns=2;s=SNMP.LastTrapName"
+      trap_count: "ns=2;s=SNMP.TrapCount"
+
+# ---------------------------------------------------------------------------
+# Devices and trap tags, modelled on the KEPServerEX SNMP driver.
+# OPC UA NodeIds: ns=2;s=<Channel>.<Device>.<Tag>  (e.g. ns=2;s=Channel1.Switch1.linkDown)
+# Every device automatically gets coldStart/warmStart/linkUp/linkDown (+ 20 table fields each)
+# and the trap events queue (EVENTS_COUNT, EVENTS_001..., EVENTS_nnn_FLDCNT, EVENTS_nnn_mmm).
+# ---------------------------------------------------------------------------
+channels:
+  - name: Channel1
+    devices:
+      - name: Switch1
+        ip: 192.168.1.20              # traps are matched to the device by source address
+        snmp_version: 2c              # 1, 2c or 3
+        trap:
+          enabled: true               # Enable SNMP Trap/Inform Support
+          port: 162                   # default: snmp.listen_port
+          protocol: UDP               # UDP or TCP
+          community: ""               # Custom Community; empty accepts any (or none)
+          number_of_events: 10        # 1-100
+          number_of_fields: 10        # 1-20
+          extended_ascii: false
+        auto_create_tags: true
+        tags:
+          - name: Port3Down
+            address: "TRAP_V2C:.1.3.6.1.6.3.1.1.5.3:P3"        # linkDown, only for ifIndex 3
+            description: Uplink port 3 down
+          - name: Port3Down_Name
+            address: "TRAP_V2C:.1.3.6.1.6.3.1.1.5.3:P3[10]"    # table field 10 = 2nd varbind value
+        # tags_csv: Switch1_tags.csv  # also load tags from a KEPServerEX-style tag CSV
+      # - name: Ups1
+      #   ip: 192.168.1.30
+      #   snmp_version: 3
+      #   v3:                          # SNMP V3 Security (one user per device)
+      #     username: upsuser
+      #     auth_protocol: SHA
+      #     auth_passphrase: ${UPS_AUTH}
+      #     priv_protocol: AES
+      #     priv_passphrase: ${UPS_PRIV}
+      #   auto_create_tags: false
+      #   tags:
+      #     - {name: OnBattery, address: "TRAP_V2C:.1.3.6.1.2.1.33.2.0.1"}
+      #     - {name: OldUpsAlarm, address: "TRAP_V1:.1.3.6.1.4.1.318:G6:S5"}
+
+  # GE MDS Orbit: read RSSI and IP of every remote radio from the master station (LN4 in the MCR).
+  # Tags: Radios.Master_LN4.Remote1 ... Remote50  = RSSI (dBm) of each remote, a fixed number per radio,
+  #       with Remote1_IP / Remote1_MAC / Remote1_Online next to each one;
+  #       Radios.Master_LN4.Remotes.<MAC>.RSSI / IP / ... and Remotes.Count / OnlineCount;
+  #       Radios.Master_LN4._Polling.OK / Error / LastPoll / DurationMs / Failures
+  - name: Radios
+    devices:
+      - name: Master_LN4
+        ip: 192.168.1.10
+        snmp_version: 2c
+        auto_create_tags: false       # set to true if the master also sends traps here
+        polling:
+          community: public           # read community
+          port: 161
+          snmp_version: 2c
+          scan_rate_ms: 10000         # 10 ms to 49 days
+          timeout_ms: 2000
+          retries: 1
+          ge_orbit_remotes: true
+          rssi_warning_dbm: -95       # remotes below this are flagged (window + diagnostics)
+          remote_tags: 50             # Remote1..Remote50; each radio keeps its number
+          remote_tag_prefix: Remote
+          # remote_slots:             # optional: pin numbers to radios (MAC in quotes, or IP)
+          #   1: "00:06:3D:12:34:56"
+          #   2: 10.10.1.22
+        tags:                         # extra values to poll (numeric OIDs, SNMP GET)
+          - {name: SysName, address: ".1.3.6.1.2.1.1.5.0"}
+          - {name: Uptime, address: ".1.3.6.1.2.1.1.3.0", data_type: DWord}
+
+traps:
+  queue_size: 10000             # traps buffered while OPC UA is slow/unreachable
+  # Friendly names for vendor OIDs (prefix match, so table columns get ".<index>" appended)
+  oid_names:
+    1.3.6.1.4.1.9.9.41.2.0.1: ciscoSyslogMIBclogMessageGenerated
+    1.3.6.1.4.1.9.9.43.2.0.1: ciscoConfigManEvent
+  # OPC UA event severity, 1..1000. Keys are trap names or OID prefixes.
+  severity:
+    default: 500
+    rules:
+      linkDown: 800
+      linkUp: 300
+      coldStart: 600
+      warmStart: 400
+      authenticationFailure: 700
+      upsTrapOnBattery: 900
+
+# Remembers which radio is Remote1, Remote2, ... (relative to this file)
+polling_state_file: snmp2opcua_slots.json
+
+logging:
+  level: INFO
