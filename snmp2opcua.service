@@ -6,21 +6,24 @@
 #   In config.yaml set  snmp.v3.state_file: /var/lib/snmp2opcua/engine.json
 #   sudo cp /opt/snmp2opcua/snmp2opcua.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now snmp2opcua
-#
-# For UDP port 162 without root: sudo setcap cap_net_bind_service=+ep /opt/snmp2opcua/venv/bin/python3
-# or use a higher port in config.yaml.
-
 [Unit]
 Description=SNMP trap to OPC UA gateway
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=simple
 User=snmp2opcua
 WorkingDirectory=/opt/snmp2opcua
-EnvironmentFile=/etc/snmp2opcua.env
 ExecStart=/opt/snmp2opcua/venv/bin/python -m snmp2opcua -c /opt/snmp2opcua/config.yaml
-Restart=on-failure
+# SNMPv3 keys referenced as ${SNMP_AUTH_KEY} / ${SNMP_PRIV_KEY} in config.yaml
+EnvironmentFile=-/etc/snmp2opcua.env
+# Writable /var/lib/snmp2opcua for the SNMPv3 engine state (engine ID + boots)
+StateDirectory=snmp2opcua
+# Lets a non-root user bind UDP 162
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+Restart=always
 RestartSec=5
 
 [Install]

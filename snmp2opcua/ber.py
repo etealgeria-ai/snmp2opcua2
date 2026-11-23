@@ -65,74 +65,98 @@ def read_tlv(data: bytes, pos: int, end: int | None = None) -> tuple[int, int, i
     if first < 0x80:
         length = first
     elif first == 0x80:
-        raise BerError("indefinite length is not used by SNMP")
+        raise BerError("indefinite length is not allowed in SNMP")
     else:
         n = first & 0x7F
-        if n == 0 or n > 4 or pos + n > limit:
-            raise BerError("bad length")
+        if n > 4 or pos + n > limit:
+            raise BerError("bad long-form length")
         length = int.from_bytes(data[pos:pos + n], "big")
         pos += n
-    if length < 0 or pos + length > limit:
-        raise BerError("length exceeds data")
-    return tag, pos, pos + length
+    value_end = pos + length
+    if value_end > limit:
+        raise BerError("length runs past end of data")
+    return tag, pos, value_end
 
 
 def expect(data: bytes, pos: int, tag: int, end: int | None = None) -> tuple[int, int]:
-    """Read a TLV that must have ``tag``. Returns (value_start, value_end)."""
-    got, start, end_ = read_tlv(data, pos, end)
+    """Read a TLV and check its tag. Returns (value_start, value_end)."""
+    got, start, stop = read_tlv(data, pos, end)
     if got != tag:
-        raise BerError(f"expected tag {tag:#x}, got {got:#x}")
-    return start, end_
+        raise BerError(f"expected tag 0x{tag:02x}, got 0x{got:02x}")
+    return start, stop
 
 
-def decode_int(data: bytes) -> int:
-    if not data:
+def decode_int(content: bytes, signed: bool = True) -> int:
+    if not content:
         raise BerError("empty integer")
-    return int.from_bytes(data, "big", signed=True)
+    if len(content) > 9:
+        raise BerError("integer too large")
+    return int.from_bytes(content, "big", signed=signed)
 
 
-def decode_oid(data: bytes) -> str:
-    if not data:
+def decode_oid(content: bytes) -> str:
+    if not content:
         raise BerError("empty OID")
-    first = data[0]
-    parts = [first // 40, first % 40]
-    val = 0
-    for b in data[1:]:
-        val = (val << 7) | (b & 0x7F)
-        if not b & 0x80:
-            parts.append(val)
-            val = 0
-    if val:
-        raise BerError("unterminated OID sub-identifier")
-    return ".".join(str(p) for p in parts)
+    if content[-1] & 0x80:
+        raise BerError("truncated OID")
+    arcs: list[int] = []
+    value = 0
+    for byte in content:
+        value = (value << 7) | (byte & 0x7F)
+        if not byte & 0x80:
+            arcs.append(value)
+            value = 0
+    first = arcs[0]
+    if first < 40:
+        head = [0, first]
+    elif first < 80:
+        head = [1, first - 40]
+    else:
+        head = [2, first - 80]
+    return ".".join(str(a) for a in head + arcs[1:])
 
 
-def decode_value(tag: int, data: bytes):
-    """Turn a BER value into a Python object suitable for JSON and OPC UA."""
+def _octets_to_text(content: bytes) -> str:
+    """Printable text if it looks like text, otherwise colon-separated hex."""
+    trimmed = content.rstrip(b"\x00")
+    try:
+        text = trimmed.decode("utf-8")
+        if all(c.isprintable() or c in "\r\n\t" for c in text):
+            return text
+    except UnicodeDecodeError:
+        pass
+    return ":".join(f"{b:02x}" for b in content)
+
+
+def decode_value(tag: int, content: bytes):
+    """Decode a varbind value. Returns (type_name, python_value)."""
+    name = TYPE_NAMES.get(tag, f"Unknown(0x{tag:02x})")
     if tag == INTEGER:
-        return decode_int(data)
+        return name, decode_int(content)
+    if tag in (COUNTER32, GAUGE32, TIMETICKS, COUNTER64):
+        return name, decode_int(content, signed=False)
     if tag == OCTET_STRING:
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError:
-            return data.hex()
-    if tag == NULL:
-        return None
+        return name, _octets_to_text(content)
     if tag == OBJECT_IDENTIFIER:
-        return decode_oid(data)
-    if tag == IP_ADDRESS and len(data) == 4:
-        return str(ipaddress.IPv4Address(data))
-    if tag in (COUNTER32, GAUGE32, TIMETICKS):
-        return int.from_bytes(data, "big")
-    if tag == COUNTER64:
-        return int.from_bytes(data, "big")
-    if tag in (NO_SUCH_OBJECT, NO_SUCH_INSTANCE, END_OF_MIB_VIEW):
-        return None
-    return data.hex()
+        return name, decode_oid(content)
+    if tag == IP_ADDRESS:
+        if len(content) != 4:
+            raise BerError("IpAddress must be 4 bytes")
+        return name, str(ipaddress.IPv4Address(content))
+    if tag in (NULL, NO_SUCH_OBJECT, NO_SUCH_INSTANCE, END_OF_MIB_VIEW):
+        return name, None
+    if tag == OPAQUE:
+        # net-snmp wraps floats in Opaque: 9f 78 04 <float> / 9f 79 08 <double>
+        if len(content) == 7 and content[:3] == b"\x9f\x78\x04":
+            return name, struct.unpack(">f", content[3:])[0]
+        if len(content) == 11 and content[:3] == b"\x9f\x79\x08":
+            return name, struct.unpack(">d", content[3:])[0]
+    # Opaque and anything unknown: keep the raw bytes as hex
+    return name, content.hex()
 
 
 # --------------------------------------------------------------------------
-# Encoding
+# Encoding (used for INFORM acknowledgements and the test trap sender)
 # --------------------------------------------------------------------------
 def encode_length(n: int) -> bytes:
     if n < 0x80:
@@ -141,43 +165,47 @@ def encode_length(n: int) -> bytes:
     return bytes([0x80 | len(body)]) + body
 
 
-def tlv(tag: int, value: bytes) -> bytes:
-    return bytes([tag]) + encode_length(len(value)) + value
+def tlv(tag: int, content: bytes) -> bytes:
+    return bytes([tag]) + encode_length(len(content)) + content
 
 
-def encode_int(n: int, tag: int = INTEGER) -> bytes:
+def encode_int(value: int, tag: int = INTEGER) -> bytes:
+    bits = (~value).bit_length() if value < 0 else value.bit_length()
+    length = bits // 8 + 1
+    return tlv(tag, value.to_bytes(length, "big", signed=True))
+
+
+def _base128(n: int) -> bytes:
     if n == 0:
-        return tlv(tag, b"\x00")
-    # two's complement, minimal length, high bit of first byte is the sign
-    length = (n.bit_length() + 8) // 8
-    body = n.to_bytes(length, "big", signed=True)
-    if body[0] == 0 and len(body) > 1 and not body[1] & 0x80:
-        body = body[1:]
-    elif body[0] == 0xFF and len(body) > 1 and body[1] & 0x80:
-        body = body[1:]
-    return tlv(tag, body)
-
-
-def encode_octets(data: bytes, tag: int = OCTET_STRING) -> bytes:
-    return tlv(tag, data)
+        return b"\x00"
+    out = []
+    while n:
+        out.append(n & 0x7F)
+        n >>= 7
+    out.reverse()
+    return bytes([b | 0x80 for b in out[:-1]] + [out[-1]])
 
 
 def encode_oid(oid: str) -> bytes:
-    parts = [int(p) for p in oid.split(".") if p]
-    if len(parts) < 2:
-        raise ValueError("OID needs at least two components")
-    body = bytes([parts[0] * 40 + parts[1]])
-    for p in parts[2:]:
-        if p < 0x80:
-            body += bytes([p])
-        else:
-            tmp = []
-            while p:
-                tmp.append(p & 0x7F)
-                p >>= 7
-            tmp[-1] |= 0x80
-            body += bytes(reversed(tmp))
+    arcs = [int(a) for a in oid.strip(".").split(".")]
+    if len(arcs) < 2:
+        raise ValueError(f"OID needs at least two arcs: {oid!r}")
+    body = _base128(arcs[0] * 40 + arcs[1]) + b"".join(_base128(a) for a in arcs[2:])
     return tlv(OBJECT_IDENTIFIER, body)
+
+
+def encode_octets(value: bytes | str) -> bytes:
+    if isinstance(value, str):
+        value = value.encode("utf-8")
+    return tlv(OCTET_STRING, value)
+
+
+def encode_null() -> bytes:
+    return b"\x05\x00"
+
+
+def encode_ip(addr: str) -> bytes:
+    return tlv(IP_ADDRESS, ipaddress.IPv4Address(addr).packed)
 
 
 def sequence(*items: bytes) -> bytes:

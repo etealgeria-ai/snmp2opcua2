@@ -112,7 +112,7 @@ channels:
       #     - {name: OldUpsAlarm, address: "TRAP_V1:.1.3.6.1.4.1.318:G6:S5"}
 
   # GE MDS Orbit: read RSSI and IP of every remote radio from the master station (LN4 in the MCR).
-  # Tags: Radios.Master_LN4.Remote1 ... Remote50  = RSSI (dBm) of each remote, a fixed number per radio,
+  # Tags: Radios.Master_LN4.Remote1 ... Remote255 = RSSI (dBm) of each remote, a fixed number per radio,
   #       with Remote1_IP / Remote1_MAC / Remote1_Online next to each one;
   #       Radios.Master_LN4.Remotes.<MAC>.RSSI / IP / ... and Remotes.Count / OnlineCount;
   #       Radios.Master_LN4._Polling.OK / Error / LastPoll / DurationMs / Failures
@@ -131,7 +131,7 @@ channels:
           retries: 1
           ge_orbit_remotes: true
           rssi_warning_dbm: -95       # remotes below this are flagged (window + diagnostics)
-          remote_tags: 50             # Remote1..Remote50; each radio keeps its number
+          remote_tags: 255            # Remote1..Remote255; each radio keeps its number
           remote_tag_prefix: Remote
           # remote_slots:             # optional: pin numbers to radios (MAC in quotes, or IP)
           #   1: "00:06:3D:12:34:56"
