@@ -1,0 +1,27 @@
+# systemd unit. Install:
+#   sudo cp -r snmp2opcua /opt/ && sudo python3 -m venv /opt/snmp2opcua/venv
+#   sudo /opt/snmp2opcua/venv/bin/pip install -r /opt/snmp2opcua/requirements.txt
+#   sudo useradd --system --no-create-home snmp2opcua
+#   printf 'SNMP_AUTH_KEY=...\nSNMP_PRIV_KEY=...\n' | sudo tee /etc/snmp2opcua.env && sudo chmod 600 /etc/snmp2opcua.env
+#   In config.yaml set  snmp.v3.state_file: /var/lib/snmp2opcua/engine.json
+#   sudo cp /opt/snmp2opcua/snmp2opcua.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now snmp2opcua
+#
+# For UDP port 162 without root: sudo setcap cap_net_bind_service=+ep /opt/snmp2opcua/venv/bin/python3
+# or use a higher port in config.yaml.
+
+[Unit]
+Description=SNMP trap to OPC UA gateway
+After=network.target
+
+[Service]
+Type=simple
+User=snmp2opcua
+WorkingDirectory=/opt/snmp2opcua
+EnvironmentFile=/etc/snmp2opcua.env
+ExecStart=/opt/snmp2opcua/venv/bin/python -m snmp2opcua -c /opt/snmp2opcua/config.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
