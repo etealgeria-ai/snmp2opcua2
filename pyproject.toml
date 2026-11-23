@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snmp2opcua"
+version = "0.2.0"
+description = "SNMP trap to OPC UA gateway (improved by GrokAI)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+  {name = "etealgeria-ai"},
+]
+dependencies = [
+  "asyncua>=1.1",
+  "PyYAML>=6.0",
+  "cryptography>=3.4",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Manufacturing",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Networking :: Monitoring",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+gui = []  # Tkinter is stdlib
+
+[project.scripts]
+snmp2opcua = "snmp2opcua.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["snmp2opcua*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
